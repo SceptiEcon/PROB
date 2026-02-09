@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UK Fiscal Risk - Bayesian Decision Tree</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .risk-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #dc2626;
+            margin-top: 10px;
+        }
+        .tree {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow-x: auto;
+        }
+        .tree svg {
+            display: block;
+            margin: 0 auto;
+        }
+        .tree-node-circle {
+            fill: white;
+            stroke: #2563eb;
+            stroke-width: 2;
+        }
+        .tree-node-circle.decision {
+            stroke: #8b5cf6;
+            stroke-width: 3;
+        }
+        .tree-node-circle.terminal {
+            fill: #fee;
+            stroke: #dc2626;
+        }
+        .tree-node-circle.terminal.stable {
+            fill: #efe;
+            stroke: #10b981;
+        }
+        .tree-branch {
+            stroke: #94a3b8;
+            stroke-width: 2;
+            fill: none;
+        }
+        .tree-label {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            font-size: 13px;
+            fill: #1e293b;
+            font-weight: 500;
+        }
+        .tree-prob {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            font-size: 11px;
+            fill: #64748b;
+        }
+        .tree-path-prob {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            font-size: 11px;
+            font-weight: bold;
+            fill: #dc2626;
+        }
+        .prob-input-group {
+            position: absolute;
+            background: white;
+            border: 2px solid #2563eb;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: none;
+            z-index: 1000;
+        }
+        .prob-input-group.active {
+            display: block;
+        }
+        .prob-input-group input[type="number"] {
+            width: 70px;
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            margin-right: 5px;
+        }
+        .prob-input-group input[type="range"] {
+            width: 150px;
+            height: 6px;
+            border-radius: 3px;
+            background: #ddd;
+            outline: none;
+        }
+        .prob-input-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #2563eb;
+            cursor: pointer;
+        }
+        .prob-input-group input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #2563eb;
+            cursor: pointer;
+            border: none;
+        }
+        .prob-input-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+            display: block;
+        }
+        .editable-node {
+            cursor: pointer;
+        }
+        .editable-node:hover circle {
+            stroke-width: 3;
+            filter: brightness(1.1);
+        }
+        .instructions {
+            background: #eff6ff;
+            border: 1px solid #3b82f6;
+            border-radius: 6px;
+            padding: 12px;
+            margin-top: 10px;
+            font-size: 14px;
+            color: #1e40af;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>UK Fiscal Risk - Bayesian Decision Tree</h1>
+            <div class="risk-value">
+                Unconditional P(Fiscal Instability) = <span id="totalRisk">25.8</span>%
+            </div>
+            <div class="instructions">
+                <strong>Click any blue node</strong> to adjust its probability using the slider or direct input.
+            </div>
+        </div>
+
+        <div class="tree">
+            <svg id="treeSvg" width="1300" height="950"></svg>
+        </div>
+    </div>
+
+    <!-- Floating probability input -->
+    <div id="probInput" class="prob-input-group">
+        <label class="prob-input-label" id="probLabel">Probability:</label>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <input type="number" id="probNumber" min="0" max="100" step="1" value="50">
+            <span>%</span>
+        </div>
+        <input type="range" id="probSlider" min="0" max="100" step="1" value="50" style="margin-top: 8px;">
+    </div>
+
+    <script>
+        let priors = {
+            starmerResigns: 0.20,
+            leftIfResigns: 0.40,
+            unstableFiscalLeftResigns: 0.70,
+            unstableFiscalRightResigns: 0.40,
+            leadershipChallenge: 0.30,
+            leftIfChallenge: 0.40,
+            unstableFiscalLeftChallenge: 0.80,
+            unstableFiscalRightChallenge: 0.15,
+            unstableFiscalStarmerStays: 0.10
+        };
+
+        let currentEditNode = null;
+
+        function calculateTotalRisk() {
+            const p = priors;
+            
+            const path1 = p.starmerResigns * p.leftIfResigns * p.unstableFiscalLeftResigns;
+            const path2 = p.starmerResigns * (1 - p.leftIfResigns) * p.unstableFiscalRightResigns;
+            const path3 = (1 - p.starmerResigns) * p.leadershipChallenge * p.leftIfChallenge * p.unstableFiscalLeftChallenge;
+            const path4 = (1 - p.starmerResigns) * p.leadershipChallenge * (1 - p.leftIfChallenge) * p.unstableFiscalRightChallenge;
+            const path5 = (1 - p.starmerResigns) * (1 - p.leadershipChallenge) * p.unstableFiscalStarmerStays;
+            
+            return (path1 + path2 + path3 + path4 + path5) * 100;
+        }
+
+        function updateDisplay() {
+            const totalRisk = calculateTotalRisk();
+            document.getElementById('totalRisk').textContent = totalRisk.toFixed(2);
+            drawTree();
+        }
+
+        function showProbInput(nodeId, label, currentValue, x, y) {
+            currentEditNode = nodeId;
+            const input = document.getElementById('probInput');
+            const probNumber = document.getElementById('probNumber');
+            const probSlider = document.getElementById('probSlider');
+            const probLabel = document.getElementById('probLabel');
+            
+            probLabel.textContent = label;
+            const pctValue = Math.round(currentValue * 100);
+            probNumber.value = pctValue;
+            probSlider.value = pctValue;
+            
+            input.style.left = (x + 50) + 'px';
+            input.style.top = (y - 30) + 'px';
+            input.classList.add('active');
+        }
+
+        function hideProbInput() {
+            document.getElementById('probInput').classList.remove('active');
+            currentEditNode = null;
+        }
+
+        // Sync number and slider
+        document.getElementById('probNumber').addEventListener('input', (e) => {
+            document.getElementById('probSlider').value = e.target.value;
+            updateProbability();
+        });
+
+        document.getElementById('probSlider').addEventListener('input', (e) => {
+            document.getElementById('probNumber').value = e.target.value;
+            updateProbability();
+        });
+
+        function updateProbability() {
+            if (currentEditNode) {
+                const value = parseFloat(document.getElementById('probNumber').value) / 100;
+                priors[currentEditNode] = value;
+                updateDisplay();
+            }
+        }
+
+        // Close input when clicking outside
+        document.addEventListener('click', (e) => {
+            const probInput = document.getElementById('probInput');
+            const svg = document.getElementById('treeSvg');
+            if (!probInput.contains(e.target) && !svg.contains(e.target)) {
+                hideProbInput();
+            }
+        });
+
+        function drawTree() {
+            const p = priors;
+            const svg = document.getElementById('treeSvg');
+            const width = 1300;
+            const height = 950;
+            
+            // Clear existing
+            svg.innerHTML = '';
+            
+            // Tree structure with positions
+            const nodes = [
+                // Root
+                { id: 'start', x: 100, y: 475, label: 'START', type: 'decision' },
+                
+                // First split - Starmer resigns
+                { id: 'resigns', x: 280, y: 250, label: 'Resigns', prob: p.starmerResigns, 
+                  editable: 'starmerResigns', editLabel: 'P(Starmer Resigns)' },
+                { id: 'stays', x: 280, y: 700, label: 'Stays', prob: 1 - p.starmerResigns },
+                
+                // Resigns -> PM choice
+                { id: 'resigns_left', x: 480, y: 120, label: 'Left PM', prob: p.leftIfResigns,
+                  editable: 'leftIfResigns', editLabel: 'P(Left | Resigns)' },
+                { id: 'resigns_right', x: 480, y: 340, label: 'Right PM', prob: 1 - p.leftIfResigns },
+                
+                // Resigns -> Left -> Fiscal
+                { id: 'resigns_left_unstable', x: 750, y: 50, label: 'Unstable', prob: p.unstableFiscalLeftResigns, 
+                  pathProb: p.starmerResigns * p.leftIfResigns * p.unstableFiscalLeftResigns, terminal: true,
+                  editable: 'unstableFiscalLeftResigns', editLabel: 'P(Unstable | Left, Resigns)' },
+                { id: 'resigns_left_stable', x: 750, y: 200, label: 'Stable', prob: 1 - p.unstableFiscalLeftResigns, 
+                  pathProb: p.starmerResigns * p.leftIfResigns * (1 - p.unstableFiscalLeftResigns), terminal: true, stable: true },
+                
+                // Resigns -> Right -> Fiscal
+                { id: 'resigns_right_unstable', x: 750, y: 300, label: 'Unstable', prob: p.unstableFiscalRightResigns, 
+                  pathProb: p.starmerResigns * (1 - p.leftIfResigns) * p.unstableFiscalRightResigns, terminal: true,
+                  editable: 'unstableFiscalRightResigns', editLabel: 'P(Unstable | Right, Resigns)' },
+                { id: 'resigns_right_stable', x: 750, y: 450, label: 'Stable', prob: 1 - p.unstableFiscalRightResigns, 
+                  pathProb: p.starmerResigns * (1 - p.leftIfResigns) * (1 - p.unstableFiscalRightResigns), terminal: true, stable: true },
+                
+                // Stays -> Challenge
+                { id: 'challenge', x: 480, y: 600, label: 'Challenge', prob: p.leadershipChallenge,
+                  editable: 'leadershipChallenge', editLabel: 'P(Challenge | Stays)' },
+                { id: 'no_challenge', x: 480, y: 800, label: 'No Challenge', prob: 1 - p.leadershipChallenge },
+                
+                // Challenge -> PM choice
+                { id: 'challenge_left', x: 700, y: 550, label: 'Left PM', prob: p.leftIfChallenge,
+                  editable: 'leftIfChallenge', editLabel: 'P(Left | Challenge)' },
+                { id: 'challenge_right', x: 700, y: 650, label: 'Right PM', prob: 1 - p.leftIfChallenge },
+                
+                // Challenge -> Left -> Fiscal
+                { id: 'challenge_left_unstable', x: 1000, y: 500, label: 'Unstable', prob: p.unstableFiscalLeftChallenge,
+                  pathProb: (1-p.starmerResigns) * p.leadershipChallenge * p.leftIfChallenge * p.unstableFiscalLeftChallenge, terminal: true,
+                  editable: 'unstableFiscalLeftChallenge', editLabel: 'P(Unstable | Left, Challenge)' },
+                { id: 'challenge_left_stable', x: 1000, y: 620, label: 'Stable', prob: 1 - p.unstableFiscalLeftChallenge,
+                  pathProb: (1-p.starmerResigns) * p.leadershipChallenge * p.leftIfChallenge * (1 - p.unstableFiscalLeftChallenge), terminal: true, stable: true },
+                
+                // Challenge -> Right -> Fiscal
+                { id: 'challenge_right_unstable', x: 1000, y: 660, label: 'Unstable', prob: p.unstableFiscalRightChallenge,
+                  pathProb: (1-p.starmerResigns) * p.leadershipChallenge * (1-p.leftIfChallenge) * p.unstableFiscalRightChallenge, terminal: true,
+                  editable: 'unstableFiscalRightChallenge', editLabel: 'P(Unstable | Right, Challenge)' },
+                { id: 'challenge_right_stable', x: 1000, y: 780, label: 'Stable', prob: 1 - p.unstableFiscalRightChallenge,
+                  pathProb: (1-p.starmerResigns) * p.leadershipChallenge * (1-p.leftIfChallenge) * (1 - p.unstableFiscalRightChallenge), terminal: true, stable: true },
+                
+                // No challenge -> Fiscal
+                { id: 'no_challenge_unstable', x: 750, y: 790, label: 'Unstable', prob: p.unstableFiscalStarmerStays,
+                  pathProb: (1-p.starmerResigns) * (1-p.leadershipChallenge) * p.unstableFiscalStarmerStays, terminal: true,
+                  editable: 'unstableFiscalStarmerStays', editLabel: 'P(Unstable | Starmer, No Challenge)' },
+                { id: 'no_challenge_stable', x: 750, y: 880, label: 'Stable', prob: 1 - p.unstableFiscalStarmerStays,
+                  pathProb: (1-p.starmerResigns) * (1-p.leadershipChallenge) * (1 - p.unstableFiscalStarmerStays), terminal: true, stable: true }
+            ];
+            
+            // Edges
+            const edges = [
+                { from: 'start', to: 'resigns' },
+                { from: 'start', to: 'stays' },
+                { from: 'resigns', to: 'resigns_left' },
+                { from: 'resigns', to: 'resigns_right' },
+                { from: 'resigns_left', to: 'resigns_left_unstable' },
+                { from: 'resigns_left', to: 'resigns_left_stable' },
+                { from: 'resigns_right', to: 'resigns_right_unstable' },
+                { from: 'resigns_right', to: 'resigns_right_stable' },
+                { from: 'stays', to: 'challenge' },
+                { from: 'stays', to: 'no_challenge' },
+                { from: 'challenge', to: 'challenge_left' },
+                { from: 'challenge', to: 'challenge_right' },
+                { from: 'challenge_left', to: 'challenge_left_unstable' },
+                { from: 'challenge_left', to: 'challenge_left_stable' },
+                { from: 'challenge_right', to: 'challenge_right_unstable' },
+                { from: 'challenge_right', to: 'challenge_right_stable' },
+                { from: 'no_challenge', to: 'no_challenge_unstable' },
+                { from: 'no_challenge', to: 'no_challenge_stable' }
+            ];
+            
+            const nodeMap = {};
+            nodes.forEach(n => nodeMap[n.id] = n);
+            
+            // Draw edges first
+            edges.forEach(edge => {
+                const from = nodeMap[edge.from];
+                const to = nodeMap[edge.to];
+                
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                const d = `M ${from.x} ${from.y} L ${to.x} ${to.y}`;
+                line.setAttribute('d', d);
+                line.setAttribute('class', 'tree-branch');
+                svg.appendChild(line);
+            });
+            
+            // Draw nodes
+            nodes.forEach(node => {
+                const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                if (node.editable) {
+                    g.setAttribute('class', 'editable-node');
+                    g.style.cursor = 'pointer';
+                    g.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const rect = svg.getBoundingClientRect();
+                        showProbInput(node.editable, node.editLabel, priors[node.editable], 
+                                    rect.left + node.x, rect.top + node.y);
+                    });
+                }
+                
+                // Circle
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', node.x);
+                circle.setAttribute('cy', node.y);
+                circle.setAttribute('r', node.terminal ? 28 : 32);
+                circle.setAttribute('class', `tree-node-circle ${node.type || ''} ${node.terminal ? 'terminal' : ''} ${node.stable ? 'stable' : ''}`);
+                g.appendChild(circle);
+                
+                // Label
+                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                text.setAttribute('x', node.x);
+                text.setAttribute('y', node.y - 40);
+                text.setAttribute('text-anchor', 'middle');
+                text.setAttribute('class', 'tree-label');
+                text.textContent = node.label;
+                g.appendChild(text);
+                
+                // Probability
+                if (node.prob !== undefined) {
+                    const probText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                    probText.setAttribute('x', node.x);
+                    probText.setAttribute('y', node.y + 5);
+                    probText.setAttribute('text-anchor', 'middle');
+                    probText.setAttribute('class', 'tree-prob');
+                    probText.textContent = `${(node.prob * 100).toFixed(1)}%`;
+                    g.appendChild(probText);
+                }
+                
+                // Path probability (if terminal)
+                if (node.pathProb !== undefined) {
+                    const pathText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                    pathText.setAttribute('x', node.x);
+                    pathText.setAttribute('y', node.y + 50);
+                    pathText.setAttribute('text-anchor', 'middle');
+                    pathText.setAttribute('class', 'tree-path-prob');
+                    pathText.textContent = `Path: ${(node.pathProb * 100).toFixed(2)}%`;
+                    g.appendChild(pathText);
+                }
+                
+                svg.appendChild(g);
+            });
+        }
+
+        // Initial display
+        updateDisplay();
+    </script>
+</body>
+</html>
